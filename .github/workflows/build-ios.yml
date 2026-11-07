@@ -107,6 +107,18 @@ jobs:
            };
            static const NSInteger controlCount = sizeof(controls) / sizeof(controls[0]);
            
+          @@ -35,9 +26,9 @@
+               NSMapTable<UITouch *, NSNumber *> *_captures;
+               UIView *_stickKnob;
+               NSTimer *_lookTimer;
+          -    CGPoint _lookDelta;
+          +    CGPoint _lookPosition;
+               int16_t _lookX, _lookY;
+          -    CFTimeInterval _lastTick;
+          +    CFTimeInterval _lookEventTime, _lookOutputTime;
+               CGRect _lastBounds;
+               UIEdgeInsets _lastInsets;
+           }
           @@ -47,6 +38,7 @@
            - (instancetype)initWithFrame:(CGRect)frame {
                if ((self = [super initWithFrame:frame])) {
@@ -149,7 +161,25 @@ jobs:
            }
            - (void)setActive:(BOOL)active {
                if (_active == active) return;
-          @@ -125,10 +117,13 @@
+          @@ -105,16 +97,14 @@
+               [_lookTimer invalidate];
+               _lookTimer = nil;
+               if (active) {
+          -        _lastTick = CACurrentMediaTime();
+                   __weak Theft4TouchControls *weakSelf = self;
+                   _lookTimer = [NSTimer timerWithTimeInterval:1.0 / 60.0 repeats:YES
+          -            block:^(NSTimer *timer) { [weakSelf publishTouchState]; }];
+          +            block:^(NSTimer *timer) { [weakSelf publishButtonsAndMovement]; }];
+                   [NSRunLoop.mainRunLoop addTimer:_lookTimer forMode:NSRunLoopCommonModes];
+               }
+           }
+           - (void)releaseAllTouches {
+               [_captures removeAllObjects];
+          -    _lookDelta = CGPointZero;
+               _lookX = _lookY = 0;
+               theft4_touch_reset();
+               _stickKnob.center = _labels[0].center;
+          @@ -125,41 +115,59 @@
                if (!_active) return;
                for (UITouch *touch in touches) {
                    CGPoint p = [touch locationInView:self];
@@ -164,18 +194,94 @@ jobs:
                    // Only one movement and one look capture; buttons are independently held.
                    if ((capture == 0 || capture == -1) &&
                        [[_captures.objectEnumerator allObjects] containsObject:@(capture)]) continue;
-          @@ -203,9 +198,8 @@
-               double elapsed = MAX(1.0 / 240.0, now - _lastTick);
-               _lastTick = now;
-               // Normalize swipe distance to a 60 Hz sample, independent of touch delivery.
+          +        if (capture == -1) {
+          +            _lookPosition = p;
+          +            _lookEventTime = touch.timestamp;
+          +            _lookX = _lookY = 0;
+          +        }
+                   [_captures setObject:@(capture) forKey:touch];
+               }
+               [self publishButtonsAndMovement];
+          +}
+          +- (void)sampleLookTouch:(UITouch *)touch {
+          +    CGPoint position = [touch locationInView:self];
+          +    double dx = position.x - _lookPosition.x;
+          +    double dy = position.y - _lookPosition.y;
+          +    double elapsed = touch.timestamp - _lookEventTime;
+          +    _lookPosition = position;
+          +    _lookEventTime = touch.timestamp;
+          +    if (dx == 0 && dy == 0) return;
+          +    // After a pause, the first delta is a new sample, not an average over the idle time.
+          +    if (elapsed <= 0 || elapsed > 0.070) elapsed = 1.0 / 60.0;
+          +    _lookX = theft4_swipe_axis(dx, elapsed, _lookSensitivity);
+          +    _lookY = theft4_swipe_axis(-dy, elapsed, _lookSensitivity);
+          +    _lookOutputTime = CACurrentMediaTime();
+           }
+           - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+               if (!_active) return;
+               for (UITouch *touch in touches) {
+          -        NSNumber *capture = [_captures objectForKey:touch];
+          -        if (capture && capture.integerValue == -1) {
+          -            CGPoint p = [touch locationInView:self], previous = [touch previousLocationInView:self];
+          -            _lookDelta.x += p.x - previous.x;
+          -            _lookDelta.y += p.y - previous.y;
+          -        }
+          +        if ([[_captures objectForKey:touch] isEqual:@(-1)]) [self sampleLookTouch:touch];
+               }
+               [self publishButtonsAndMovement];
+           }
+           - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+               for (UITouch *touch in touches) {
+          -        if ([[_captures objectForKey:touch] isEqual:@(-1)]) {
+          -            _lookDelta = CGPointZero;
+          -            _lookX = _lookY = 0;
+          -        }
+          +        if ([[_captures objectForKey:touch] isEqual:@(-1)]) [self sampleLookTouch:touch];
+                   [_captures removeObjectForKey:touch];
+               }
+               [self publishButtonsAndMovement];
+           }
+           - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+          -    [self touchesEnded:touches withEvent:event];
+          +    for (UITouch *touch in touches) {
+          +        if ([[_captures objectForKey:touch] isEqual:@(-1)]) _lookX = _lookY = 0;
+          +        [_captures removeObjectForKey:touch];
+          +    }
+          +    [self publishButtonsAndMovement];
+           }
+           - (theft4_touch_pad)buttonsAndMovement {
+               theft4_touch_pad state = {0};
+          @@ -190,26 +198,14 @@
+               return state;
+           }
+           - (void)publishButtonsAndMovement {
+          -    // Immediate releases/buttons; camera deltas are consumed only by the timer.
+          +    if (!_active) return;
+          +    if (!theft4_swipe_is_current(CACurrentMediaTime(), _lookOutputTime)) {
+          +        _lookX = _lookY = 0;
+          +    }
+               theft4_touch_pad state = [self buttonsAndMovement];
+               state.rx = _lookX;
+               state.ry = _lookY;
+               theft4_touch_store(state);
+           }
+          -- (void)publishTouchState {
+          -    if (!_active) return;
+          -    theft4_touch_pad state = [self buttonsAndMovement];
+          -    CFTimeInterval now = CACurrentMediaTime();
+          -    double elapsed = MAX(1.0 / 240.0, now - _lastTick);
+          -    _lastTick = now;
+          -    // Normalize swipe distance to a 60 Hz sample, independent of touch delivery.
           -    double scale = 1.0 / (18.0 * elapsed * 60.0);
           -    state.rx = (int16_t)lround(MAX(-1, MIN(1, _lookDelta.x * scale)) * 32767);
           -    state.ry = (int16_t)lround(MAX(-1, MIN(1, -_lookDelta.y * scale)) * 32767);
-          +    state.rx = theft4_swipe_axis(_lookDelta.x, elapsed, _lookSensitivity);
-          +    state.ry = theft4_swipe_axis(-_lookDelta.y, elapsed, _lookSensitivity);
-               _lookX = state.rx;
-               _lookY = state.ry;
-               _lookDelta = CGPointZero;
+          -    _lookX = state.rx;
+          -    _lookY = state.ry;
+          -    _lookDelta = CGPointZero;
+          -    theft4_touch_store(state);
+          -}
+           - (void)dealloc { [_lookTimer invalidate]; }
+           @end
           --- a/ios/Theft4/Theft4LauncherView.h
           +++ b/ios/Theft4/Theft4LauncherView.h
           @@ -11,6 +11,8 @@
@@ -221,7 +327,7 @@ jobs:
                    [self setting:@"FRAME-TIME GRAPH" detail:@"Frame delivery against the 33.3 ms target. Double-tap for a short detailed profile. Hold to mark a lag spike or stop and save a long capture." toggle:_showFrameTime],
                    [self setting:@"TOUCH CONTROLS" detail:@"Physical controllers continue to work when the overlay is hidden." toggle:_showControls],
           +        Column(@[Copy(@"滑动视角灵敏度", 14, YES),
-          +            Copy(@"在右侧空白区域滑动转动视角，松手即停。范围 0.25–20 倍，自动保存；不影响实体手柄。", 12, NO),
+          +            Copy(@"在右侧空白区域滑动转动视角。范围 0.25–20 倍，自动保存；不影响实体手柄。", 12, NO),
           +            _lookSensitivity, _lookSensitivityMetrics, _resetLookSensitivity], 8),
                    Copy(@"A connected controller can move focus through this launcher. Use the D-pad or left stick to navigate and A to select.", 12, NO)
                ], 20);
@@ -305,7 +411,7 @@ jobs:
                </array>
           --- /dev/null
           +++ b/ios/Theft4/Theft4TouchPolicy.h
-          @@ -0,0 +1,46 @@
+          @@ -0,0 +1,52 @@
           +#pragma once
           +#include <math.h>
           +#include <stdint.h>
@@ -320,6 +426,12 @@ jobs:
           +    double value = delta * theft4_look_sensitivity(sensitivity) /
           +        (18.0 * fmax(1.0 / 240.0, elapsed) * 60.0);
           +    return (int16_t)lround(fmax(-1.0, fmin(1.0, value)) * 32767.0);
+          +}
+          +
+          +// Keep a swipe sample visible across two 30 Hz game polls. This also lets
+          +// a short swipe survive a lift before the next poll, without leaving a stuck axis.
+          +static inline int theft4_swipe_is_current(double now, double sample_time) {
+          +    return now >= sample_time && now - sample_time < 0.070;
           +}
           +
           +typedef struct { double x, y, w, h; } Theft4TouchRect;
@@ -354,7 +466,7 @@ jobs:
           +}
           --- /dev/null
           +++ b/ios/tests/touch_policy_test.c
-          @@ -0,0 +1,36 @@
+          @@ -0,0 +1,42 @@
           +#include "Theft4TouchPolicy.h"
           +#include <assert.h>
           +#include <stdio.h>
@@ -386,6 +498,12 @@ jobs:
           +    assert(theft4_swipe_axis(20,.5,1) == 0); // Discard stale motion after a stall.
           +    assert(theft4_swipe_axis(NAN,1.0/60,1) == 0);
           +    assert(theft4_swipe_axis(5,0,1) == 0);
+          +    // A 30 Hz poll can miss a one-tick swipe. Keep the last sample across
+          +    // two polls, then expire it even if there were no further touch events.
+          +    assert(theft4_swipe_is_current(1 + 1.0/30, 1));
+          +    assert(theft4_swipe_is_current(1 + 2.0/30, 1));
+          +    assert(!theft4_swipe_is_current(1 + 3.0/30, 1));
+          +    assert(!theft4_swipe_is_current(0.99, 1));
           +    check_layout(568,300); check_layout(667,354); check_layout(724,354);
           +    check_layout(818,381); check_layout(932,409); check_layout(1024,724);
           +    check_layout(1194,790); check_layout(1366,980);
@@ -457,3 +575,4 @@ jobs:
             Theft4/out/direct-metal/ios/Host/COMPILATION.json
           if-no-files-found: warn
           retention-days: 7
+
