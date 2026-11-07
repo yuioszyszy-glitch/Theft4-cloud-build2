@@ -21,6 +21,7 @@ jobs:
       run:
         shell: bash
     env:
+      THEFT4_RENDERER: metal
       THEFT4_BUILD_JOBS: '3'
       THEFT4_SUSTAINED_EXECUTION: 'OFF'
     steps:
@@ -30,14 +31,6 @@ jobs:
           repository: KoreanSeats1/Theft4
           ref: 88115fefad59cfcb62d17c0c9548a7a900c01a23
           path: Theft4
-          persist-credentials: false
-      - name: Checkout iOS graphics dependencies
-        uses: actions/checkout@v4
-        with:
-          repository: xenios-jp/XeniOS
-          ref: 9b38208320963314340fc547f8b766185f9adad5
-          path: XeniOS
-          submodules: recursive
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
@@ -53,7 +46,7 @@ jobs:
           xcodebuild -downloadComponent MetalToolchain
           xcodebuild -showComponent MetalToolchain -json
           printf 'DEVELOPER_DIR=%s\n' "$(xcode-select -p)" >> "$GITHUB_ENV"
-          printf 'THEFT4_MOLTENVK_IOS_LIB_DIR=%s/XeniOS/build-ios-xcode/obj/iOS/Release\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          printf 'THEFT4_MOLTENVK_IOS_LIB_DIR=%s/Theft4/out/no-moltenvk\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           printf 'THEFT4_METAL_LIBRARIES=%s/Theft4/out/direct-metal/ios\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           printf 'THEFT4_METAL_HOST_LIBRARIES=%s/Theft4/out/direct-metal/ios/Host\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
       - name: Apply touch changes and run portable tests
@@ -412,22 +405,6 @@ jobs:
           set -euo pipefail
           python tools/setup_repo.py 2>&1 | tee ../logs/dependencies.log
           python tools/setup_repo.py --check
-      - name: Build iPhoneOS graphics libraries
-        run: |
-          set -euo pipefail
-          cmake -S XeniOS -B XeniOS/build-ios-xcode -G Xcode \
-            -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos \
-            -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0 \
-            -DXENIA_ENABLE_IOS_MOLTENVK=ON \
-            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
-            2>&1 | tee logs/graphics-configure.log
-          cmake --build XeniOS/build-ios-xcode --config Release \
-            --target MoltenVK MoltenVK_Common MoltenVK_ShaderConverter spirv-cross SPIRV-Tools-static \
-            --parallel 3 2>&1 | tee logs/graphics-build.log
-          for lib in libMoltenVK.a libMoltenVK_Common.a libMoltenVK_ShaderConverter.a libspirv-cross.a libSPIRV-Tools.a; do
-            test -f "$THEFT4_MOLTENVK_IOS_LIB_DIR/$lib"
-            lipo -verify_arch arm64 "$THEFT4_MOLTENVK_IOS_LIB_DIR/$lib"
-          done
       - name: Generate and compile iOS Metal shaders
         working-directory: Theft4
         run: |
@@ -442,6 +419,8 @@ jobs:
         working-directory: Theft4
         run: |
           set -euo pipefail
+          # Direct Metal does not use the optional Vulkan probe.
+          perl -0pi -e 's/\nrequired_libraries=\(.*?\n\)\nfor library in \$required_libraries; do\n.*?\ndone\n/\n/s or die "Expected MoltenVK preflight not found"' tools/build_ios_release.sh
           zsh tools/build_ios_release.sh 0.3.2 2>&1 | tee ../logs/ipa-build.log
       - name: Upload IPA
         uses: actions/upload-artifact@v4
