@@ -46,7 +46,7 @@ jobs:
           xcodebuild -downloadComponent MetalToolchain
           xcodebuild -showComponent MetalToolchain -json
           printf 'DEVELOPER_DIR=%s\n' "$(xcode-select -p)" >> "$GITHUB_ENV"
-          printf 'THEFT4_MOLTENVK_IOS_LIB_DIR=%s/Theft4/out/no-moltenvk\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          printf 'THEFT4_MOLTENVK_IOS_LIB_DIR=%s/Theft4/out/moltenvk-ios\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           printf 'THEFT4_METAL_LIBRARIES=%s/Theft4/out/direct-metal/ios\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           printf 'THEFT4_METAL_HOST_LIBRARIES=%s/Theft4/out/direct-metal/ios/Host\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
       - name: Apply touch changes and run portable tests
@@ -399,6 +399,18 @@ jobs:
           c++ -std=c++17 -pthread -Iios/bridge ios/tests/touch_input_test.cpp ios/bridge/theft4_touch_input.cpp -o /tmp/touch-input-test
           /tmp/touch-input-test
           git diff --check
+      - name: Install Khronos MoltenVK iOS static archive
+        run: |
+          set -euo pipefail
+          mkdir -p "$THEFT4_MOLTENVK_IOS_LIB_DIR"
+          temp_dir=$(mktemp -d)
+          trap 'rm -rf "$temp_dir"' EXIT
+          curl --fail --location --retry 3 -o "$temp_dir/MoltenVK-ios.tar" https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.2/MoltenVK-ios.tar
+          tar -xf "$temp_dir/MoltenVK-ios.tar" -C "$temp_dir"
+          archive=$(find "$temp_dir" -type f -path '*/static/MoltenVK.xcframework/ios-arm64/*' \( -name libMoltenVK.a -o -name MoltenVK \) -print -quit)
+          test -n "$archive"
+          lipo -verify_arch arm64 "$archive"
+          cp "$archive" "$THEFT4_MOLTENVK_IOS_LIB_DIR/libMoltenVK.a"
       - name: Prepare pinned Theft4 dependencies
         working-directory: Theft4
         run: |
@@ -419,8 +431,9 @@ jobs:
         working-directory: Theft4
         run: |
           set -euo pipefail
-          # Direct Metal does not use the optional Vulkan probe.
-          perl -0pi -e 's/\nrequired_libraries=\(.*?\n\)\nfor library in \$required_libraries; do\n.*?\ndone\n/\n/s or die "Expected MoltenVK preflight not found"' tools/build_ios_release.sh
+          # The Khronos distribution combines the graphics libraries into one archive.
+          perl -0pi -e 's/\nrequired_libraries=\(.*?\n\)/\nrequired_libraries=(libMoltenVK.a)/s or die "Expected MoltenVK preflight not found"' tools/build_ios_release.sh
+          perl -ni -e 'print unless m@\$\{THEFT4_XENIOS_IOS_LIB_DIR\}/lib(?:MoltenVK_ShaderConverter|MoltenVK_Common|spirv-cross|SPIRV-Tools)\.a"@' ios/CMakeLists.txt
           zsh tools/build_ios_release.sh 0.3.2 2>&1 | tee ../logs/ipa-build.log
       - name: Upload IPA
         uses: actions/upload-artifact@v4
