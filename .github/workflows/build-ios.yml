@@ -409,7 +409,7 @@ jobs:
           tar -xf "$temp_dir/MoltenVK-ios.tar" -C "$temp_dir"
           archive=$(find "$temp_dir" -type f -path '*/static/MoltenVK.xcframework/ios-arm64/*' \( -name libMoltenVK.a -o -name MoltenVK \) -print -quit)
           test -n "$archive"
-          lipo -verify_arch arm64 "$archive"
+          lipo "$archive" -verify_arch arm64
           cp "$archive" "$THEFT4_MOLTENVK_IOS_LIB_DIR/libMoltenVK.a"
       - name: Prepare pinned Theft4 dependencies
         working-directory: Theft4
