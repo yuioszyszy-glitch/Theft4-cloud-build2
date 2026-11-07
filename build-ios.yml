@@ -1,0 +1,467 @@
+name: Build Theft4 touch IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [".github/workflows/build-ios.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: theft4-ios-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      THEFT4_BUILD_JOBS: '3'
+      THEFT4_SUSTAINED_EXECUTION: 'OFF'
+    steps:
+      - name: Checkout exact Theft4 source
+        uses: actions/checkout@v4
+        with:
+          repository: KoreanSeats1/Theft4
+          ref: 88115fefad59cfcb62d17c0c9548a7a900c01a23
+          path: Theft4
+          persist-credentials: false
+      - name: Checkout iOS graphics dependencies
+        uses: actions/checkout@v4
+        with:
+          repository: xenios-jp/XeniOS
+          ref: 9b38208320963314340fc547f8b766185f9adad5
+          path: XeniOS
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build tools and verify Xcode
+        run: |
+          set -euo pipefail
+          mkdir -p logs
+          python -m pip install 'cmake>=3.29,<5' ninja
+          brew install pkg-config
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcodebuild -downloadComponent MetalToolchain
+          xcodebuild -showComponent MetalToolchain -json
+          printf 'DEVELOPER_DIR=%s\n' "$(xcode-select -p)" >> "$GITHUB_ENV"
+          printf 'THEFT4_MOLTENVK_IOS_LIB_DIR=%s/XeniOS/build-ios-xcode/obj/iOS/Release\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          printf 'THEFT4_METAL_LIBRARIES=%s/Theft4/out/direct-metal/ios\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          printf 'THEFT4_METAL_HOST_LIBRARIES=%s/Theft4/out/direct-metal/ios/Host\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - name: Apply touch changes and run portable tests
+        working-directory: Theft4
+        run: |
+          set -euo pipefail
+          patch_file="$(mktemp)"
+          trap 'rm -f "$patch_file"' EXIT
+          cat > "$patch_file" <<'THEFT4_TOUCH_PATCH_END'
+          --- a/ios/Theft4/Theft4TouchControls.h
+          +++ b/ios/Theft4/Theft4TouchControls.h
+          @@ -3,5 +3,6 @@
+           // UIKit-only adapter; no XeniOS emulator, renderer or editor dependency.
+           @interface Theft4TouchControls : UIView
+           @property(nonatomic, getter=isActive) BOOL active;
+          +@property(nonatomic) double lookSensitivity;
+           - (void)releaseAllTouches;
+           @end
+          --- a/ios/Theft4/Theft4TouchControls.m
+          +++ b/ios/Theft4/Theft4TouchControls.m
+          @@ -5,28 +5,19 @@
+           #import <QuartzCore/QuartzCore.h>
+           #include <math.h>
+           #include "theft4_touch_input.h"
+          +#include "Theft4TouchPolicy.h"
+           
+          -typedef struct { const char *label; CGFloat x, y, w, h; uint16_t button; int trigger; } PadControl;
+          -// XeniOS FPS Compact normalized positions, with explicit D-pad / stick-click
+          -// buttons instead of its editor's combined ring and secondary tap gestures.
+          +typedef struct { const char *label; uint16_t button; int trigger; } PadControl;
+          +// Index order is shared with theft4_control_rect.
+           static const PadControl controls[] = {
+          -    {"Move", .055, .56, .190, .315, 0, 0},
+          -    {"Back", .390, .045, .080, .112, 0x20, 0},
+          -    {"Start", .495, .045, .085, .112, 0x10, 0},
+          -    {"LB", .660, .050, .085, .112, 0x100, 0},
+          -    {"RB", .765, .050, .085, .112, 0x200, 0},
+          -    {"LT", .095, .405, .120, .110, 0, 1},
+          -    {"Y", .760, .455, .065, .115, 0x8000, 0},
+          -    {"X", .700, .585, .065, .115, 0x4000, 0},
+          -    {"B", .820, .585, .065, .115, 0x2000, 0},
+          -    {"A", .760, .715, .065, .115, 0x1000, 0},
+          -    {"RT", .860, .405, .120, .110, 0, 2},
+          -    {"↑", .315, .68, .055, .085, 0x1, 0},
+          -    {"↓", .315, .86, .055, .085, 0x2, 0},
+          -    {"←", .258, .77, .055, .085, 0x4, 0},
+          -    {"→", .372, .77, .055, .085, 0x8, 0},
+          -    {"L3", .440, .85, .065, .10, 0x40, 0},
+          -    {"R3", .530, .85, .065, .10, 0x80, 0},
+          +    {"移动", 0, 0}, {"返回", 0x20, 0}, {"暂停", 0x10, 0},
+          +    {"LB", 0x100, 0}, {"RB", 0x200, 0},
+          +    {"LT\n刹车/瞄准", 0, 1},
+          +    {"Y", 0x8000, 0}, {"X", 0x4000, 0},
+          +    {"B", 0x2000, 0}, {"A", 0x1000, 0},
+          +    {"RT\n油门/射击", 0, 2},
+          +    {"↑", 0x1, 0}, {"↓", 0x2, 0}, {"←", 0x4, 0}, {"→", 0x8, 0},
+          +    {"L3", 0x40, 0}, {"R3", 0x80, 0},
+           };
+           static const NSInteger controlCount = sizeof(controls) / sizeof(controls[0]);
+           
+          @@ -47,6 +38,7 @@
+           - (instancetype)initWithFrame:(CGRect)frame {
+               if ((self = [super initWithFrame:frame])) {
+                   self.multipleTouchEnabled = YES;
+          +        _lookSensitivity = 1.0;
+                   self.hidden = YES;
+                   self.accessibilityIdentifier = @"game.touchControls";
+                   _captures = [NSMapTable strongToStrongObjectsMapTable];
+          @@ -55,6 +47,7 @@
+                       UILabel *label = [UILabel new];
+                       label.text = [NSString stringWithUTF8String:controls[i].label];
+                       label.textAlignment = NSTextAlignmentCenter;
+          +            label.numberOfLines = 2;
+                       label.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+                       label.adjustsFontSizeToFitWidth = YES;
+                       label.textColor = UIColor.whiteColor;
+          @@ -83,19 +76,18 @@
+               }
+               CGRect area = UIEdgeInsetsInsetRect(self.bounds, self.safeAreaInsets);
+               for (NSInteger i = 0; i < controlCount; ++i) {
+          -        PadControl c = controls[i];
+          -        CGFloat w = MAX(36, c.w * area.size.width);
+          -        CGFloat h = MAX(36, c.h * area.size.height);
+          -        // Circular movement pad; landscape positions remain proportional.
+          -        if (i == 0) w = h = MIN(w, h);
+          -        _labels[i].frame = CGRectMake(area.origin.x + c.x * area.size.width,
+          -            area.origin.y + c.y * area.size.height, w, h);
+          +        Theft4TouchRect r = theft4_control_rect((int)i, area.size.width, area.size.height);
+          +        CGFloat w = r.w, h = r.h;
+          +        _labels[i].frame = CGRectMake(area.origin.x + r.x, area.origin.y + r.y, w, h);
+                   _labels[i].layer.cornerRadius = i == 0 ? w / 2 : MIN(w, h) / 3;
+               }
+               CGFloat diameter = _labels[0].bounds.size.width * .36;
+               _stickKnob.bounds = CGRectMake(0, 0, diameter, diameter);
+               _stickKnob.layer.cornerRadius = diameter / 2;
+               _stickKnob.center = _labels[0].center;
+          +}
+          +- (void)setLookSensitivity:(double)lookSensitivity {
+          +    _lookSensitivity = theft4_look_sensitivity(lookSensitivity);
+           }
+           - (void)setActive:(BOOL)active {
+               if (_active == active) return;
+          @@ -125,10 +117,13 @@
+               if (!_active) return;
+               for (UITouch *touch in touches) {
+                   CGPoint p = [touch locationInView:self];
+          -        NSInteger capture = -1; // Unoccupied background is swipe-to-look.
+          +        NSInteger capture = -1; // Only the right-hand background starts a camera gesture.
+                   for (NSInteger i = controlCount - 1; i >= 0; --i) {
+                       if (CGRectContainsPoint(_labels[i].frame, p)) { capture = i; break; }
+                   }
+          +        CGRect area = UIEdgeInsetsInsetRect(self.bounds, self.safeAreaInsets);
+          +        if (capture == -1 && (!CGRectContainsPoint(area, p) ||
+          +            p.x < CGRectGetMinX(area) + area.size.width * .42)) continue;
+                   // Only one movement and one look capture; buttons are independently held.
+                   if ((capture == 0 || capture == -1) &&
+                       [[_captures.objectEnumerator allObjects] containsObject:@(capture)]) continue;
+          @@ -203,9 +198,8 @@
+               double elapsed = MAX(1.0 / 240.0, now - _lastTick);
+               _lastTick = now;
+               // Normalize swipe distance to a 60 Hz sample, independent of touch delivery.
+          -    double scale = 1.0 / (18.0 * elapsed * 60.0);
+          -    state.rx = (int16_t)lround(MAX(-1, MIN(1, _lookDelta.x * scale)) * 32767);
+          -    state.ry = (int16_t)lround(MAX(-1, MIN(1, -_lookDelta.y * scale)) * 32767);
+          +    state.rx = theft4_swipe_axis(_lookDelta.x, elapsed, _lookSensitivity);
+          +    state.ry = theft4_swipe_axis(-_lookDelta.y, elapsed, _lookSensitivity);
+               _lookX = state.rx;
+               _lookY = state.ry;
+               _lookDelta = CGPointZero;
+          --- a/ios/Theft4/Theft4LauncherView.h
+          +++ b/ios/Theft4/Theft4LauncherView.h
+          @@ -11,6 +11,8 @@
+           @property(nonatomic, readonly) UISwitch *showFPS;
+           @property(nonatomic, readonly) UISwitch *showFrameTime;
+           @property(nonatomic, readonly) UISwitch *showControls;
+          +@property(nonatomic, readonly) UISlider *lookSensitivity;
+          +@property(nonatomic, readonly) UIButton *resetLookSensitivity;
+           @property(nonatomic, readonly) UISwitch *anisotropicFiltering;
+           @property(nonatomic, readonly) UISwitch *enhancedOutput;
+           @property(nonatomic, readonly) UISwitch *fsrBoost;
+          --- a/ios/Theft4/Theft4LauncherView.m
+          +++ b/ios/Theft4/Theft4LauncherView.m
+          @@ -101,6 +101,7 @@
+               UIView *_topRule, *_bottomRule, *_navRule;
+               UIScrollView *_scroll, *_navigationScroll;
+               UIStackView *_content, *_navigation;
+          +    UILabel *_lookSensitivityMetrics;
+               UIStackView *_play, *_graphics, *_interfacePage, *_system, *_mods;
+               UILabel *_playHeadline, *_playIntro, *_playSaveNote;
+               NSArray<UIButton *> *_tabs;
+          @@ -374,11 +375,28 @@
+               }
+               _graphics = Column(graphicsRows, 20);
+           
+          +    _lookSensitivity = [UISlider new];
+          +    _lookSensitivity.minimumValue = 0.25;
+          +    _lookSensitivity.maximumValue = 4.0;
+          +    _lookSensitivity.value = 1.0;
+          +    _lookSensitivity.minimumTrackTintColor = Ink(0x35CDD1);
+          +    _lookSensitivity.accessibilityIdentifier = @"settings.lookSensitivity";
+          +    _lookSensitivity.accessibilityLabel = @"滑动视角灵敏度";
+          +    _lookSensitivity.accessibilityHint = @"右侧空白处滑动转动视角。数值越大，转动越快。";
+          +    [_lookSensitivity.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+          +    [_lookSensitivity addTarget:self action:@selector(refreshConfigurationSummary)
+          +        forControlEvents:UIControlEventValueChanged];
+          +    _lookSensitivityMetrics = Copy(@"1.00×", 12, YES);
+          +    _resetLookSensitivity = Action(@"恢复默认灵敏度", NO);
+          +    _resetLookSensitivity.accessibilityIdentifier = @"settings.resetLookSensitivity";
+               _interfacePage = Column(@[
+                   [self setting:@"CPU / THREAD GRAPH" detail:@"Compact device-core and game-thread activity. Updates once per second; included in long captures while enabled." toggle:_showCPUUsage],
+                   [self setting:@"FRAME COUNTER" detail:@"Unique game frames in the top-right corner." toggle:_showFPS],
+                   [self setting:@"FRAME-TIME GRAPH" detail:@"Frame delivery against the 33.3 ms target. Double-tap for a short detailed profile. Hold to mark a lag spike or stop and save a long capture." toggle:_showFrameTime],
+                   [self setting:@"TOUCH CONTROLS" detail:@"Physical controllers continue to work when the overlay is hidden." toggle:_showControls],
+          +        Column(@[Copy(@"滑动视角灵敏度", 14, YES),
+          +            Copy(@"在右侧空白区域滑动转动视角，松手即停。范围 0.25–4 倍，自动保存；不影响实体手柄。", 12, NO),
+          +            _lookSensitivity, _lookSensitivityMetrics, _resetLookSensitivity], 8),
+                   Copy(@"A connected controller can move focus through this launcher. Use the D-pad or left stick to navigate and A to select.", 12, NO)
+               ], 20);
+           
+          @@ -827,6 +845,8 @@
+           }
+           
+           - (void)refreshConfigurationSummary {
+          +    _lookSensitivityMetrics.text = [NSString stringWithFormat:@"%.2f×", _lookSensitivity.value];
+          +    _lookSensitivity.accessibilityValue = _lookSensitivityMetrics.text;
+               if (_sharpening) {
+                   const NSInteger strength = (NSInteger)lroundf(_sharpening.value);
+                   _sharpeningMetrics.text = strength ? [NSString stringWithFormat:@"%ld%% · NEXT GAME LAUNCH", (long)strength] : @"OFF · 0%";
+          --- a/ios/Theft4/main.m
+          +++ b/ios/Theft4/main.m
+          @@ -26,6 +26,7 @@
+           extern int rex_gta4_native_profile_start(void);
+           extern int rex_gta4_native_profile_status(void);
+           #import "Theft4TouchControls.h"
+          +#include "Theft4TouchPolicy.h"
+           #import "Theft4LauncherView.h"
+           #ifdef THEFT4_TEXTURE_PREPARATION_PREVIEW
+           #import "Theft4TextureSources.h"
+          @@ -734,6 +735,7 @@
+                   @"Theft4ShowFPS": @NO,
+                   @"Theft4ShowFrameTime": @NO,
+                   @"Theft4ShowTouchControls": @NO,
+          +        @"Theft4LookSensitivity": @1.0,
+                   @"Theft4AnisotropicFiltering": @(!_legacyIPadProfile),
+                   @"Theft4EnhancedOutput1080p": @(!_legacyIPadProfile),
+                   @"Theft4ExperimentalFSRBoost": @NO,
+          @@ -882,6 +884,12 @@
+                   toggle.on = [NSUserDefaults.standardUserDefaults boolForKey:keys[i]];
+                   [toggle addTarget:self action:@selector(displaySettingsChanged:) forControlEvents:UIControlEventValueChanged];
+               }
+          +    _bringupOverlay.lookSensitivity.value = theft4_look_sensitivity(
+          +        [NSUserDefaults.standardUserDefaults doubleForKey:@"Theft4LookSensitivity"]);
+          +    [_bringupOverlay.lookSensitivity addTarget:self action:@selector(lookSensitivityChanged:)
+          +        forControlEvents:UIControlEventValueChanged];
+          +    [_bringupOverlay.resetLookSensitivity addTarget:self action:@selector(resetLookSensitivity:)
+          +        forControlEvents:UIControlEventTouchUpInside];
+               [self resetAutomaticCaptureForNewSession];
+               [_performanceCapture addTarget:self action:@selector(displaySettingsChanged:)
+                            forControlEvents:UIControlEventValueChanged];
+          @@ -958,6 +966,7 @@
+               if (!theft4_retail_mode() && diagnosticCapture && strcmp(diagnosticCapture, "1") == 0) _performanceCapture.on = YES;
+               [_bringupOverlay refreshConfigurationSummary];
+               _touchControls = [Theft4TouchControls new];
+          +    _touchControls.lookSensitivity = _bringupOverlay.lookSensitivity.value;
+               _touchControls.translatesAutoresizingMaskIntoConstraints = NO;
+               [self.view addSubview:_touchControls];
+               [NSLayoutConstraint activateConstraints:@[
+          @@ -2016,6 +2025,17 @@
+               [self presentViewController:alert animated:YES completion:nil];
+           }
+           #endif
+          +- (void)lookSensitivityChanged:(UISlider *)sender {
+          +    double value = theft4_look_sensitivity(round(sender.value * 20.0) / 20.0);
+          +    sender.value = value;
+          +    [NSUserDefaults.standardUserDefaults setDouble:value forKey:@"Theft4LookSensitivity"];
+          +    _touchControls.lookSensitivity = value;
+          +    [_bringupOverlay refreshConfigurationSummary];
+          +}
+          +- (void)resetLookSensitivity:(id)sender {
+          +    _bringupOverlay.lookSensitivity.value = 1.0;
+          +    [self lookSensitivityChanged:_bringupOverlay.lookSensitivity];
+          +}
+           - (void)displaySettingsChanged:(UIControl *)sender {
+               if (sender) [NSUserDefaults.standardUserDefaults setObject:@"custom" forKey:@"Theft4GraphicsPreset"];
+               if (_bringupOverlay.sharpening) {
+          --- a/ios/Theft4/Info.plist.in
+          +++ b/ios/Theft4/Info.plist.in
+          @@ -21,8 +21,6 @@
+               <key>LSSupportsOpeningDocumentsInPlace</key><true/>
+               <key>UILaunchScreen</key><dict/>
+               <key>UISupportedInterfaceOrientations</key><array>
+          -        <string>UIInterfaceOrientationPortrait</string>
+          -        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+                   <string>UIInterfaceOrientationLandscapeLeft</string>
+                   <string>UIInterfaceOrientationLandscapeRight</string>
+               </array>
+          --- /dev/null
+          +++ b/ios/Theft4/Theft4TouchPolicy.h
+          @@ -0,0 +1,46 @@
+          +#pragma once
+          +#include <math.h>
+          +#include <stdint.h>
+          +
+          +// Shared with the portable regression test; UIKit coordinates are points.
+          +static inline double theft4_look_sensitivity(double value) {
+          +    if (!isfinite(value)) return 1.0;
+          +    return fmax(0.25, fmin(4.0, value));
+          +}
+          +static inline int16_t theft4_swipe_axis(double delta, double elapsed, double sensitivity) {
+          +    if (!isfinite(delta) || !isfinite(elapsed) || elapsed <= 0 || elapsed > 0.25) return 0;
+          +    double value = delta * theft4_look_sensitivity(sensitivity) /
+          +        (18.0 * fmax(1.0 / 240.0, elapsed) * 60.0);
+          +    return (int16_t)lround(fmax(-1.0, fmin(1.0, value)) * 32767.0);
+          +}
+          +
+          +typedef struct { double x, y, w, h; } Theft4TouchRect;
+          +// Landscape safe-area layout. Right middle stays open for swipe-to-look.
+          +static inline Theft4TouchRect theft4_control_rect(int index, double width, double height) {
+          +    double b = fmax(40, fmin(62, fmin(width / 15, height / 7.5)));
+          +    double gap = 8, edge = 12, step = b + gap;
+          +    double d = b * 2.4, small = fmax(36, b * 0.8), ds = small + 4;
+          +    double right = width - edge - b, bottom = height - edge - b;
+          +    Theft4TouchRect r = {0, 0, b, b};
+          +    switch (index) {
+          +        case 0: r = (Theft4TouchRect){edge, height-edge-d, d, d}; break;
+          +        case 1: r.x = width/2-step; r.y = edge; break;
+          +        case 2: r.x = width/2+gap; r.y = edge; break;
+          +        case 3: r.x = right-step; r.y = edge; break;
+          +        case 4: r.x = right; r.y = edge; break;
+          +        // The two larger bottom-right pedals are LT (brake/aim), RT (gas/fire).
+          +        case 5: r = (Theft4TouchRect){width-edge-2.5*b-gap, height-edge-1.25*b, 1.25*b, 1.25*b}; break;
+          +        case 10: r = (Theft4TouchRect){width-edge-1.25*b, height-edge-1.25*b, 1.25*b, 1.25*b}; break;
+          +        case 6: r.x = right; r.y = bottom-2.25*b-2*gap; break;
+          +        case 7: r.x = right-step; r.y = bottom-2.25*b-2*gap; break;
+          +        case 8: r.x = right; r.y = bottom-1.25*b-gap; break;
+          +        case 9: r.x = right-step; r.y = bottom-1.25*b-gap; break;
+          +        case 11: r = (Theft4TouchRect){edge+ds, edge, small, small}; break;
+          +        case 12: r = (Theft4TouchRect){edge+ds, edge+2*ds, small, small}; break;
+          +        case 13: r = (Theft4TouchRect){edge, edge+ds, small, small}; break;
+          +        case 14: r = (Theft4TouchRect){edge+2*ds, edge+ds, small, small}; break;
+          +        case 15: r.x = edge+d+gap; r.y = bottom; break;
+          +        case 16: r.x = width-edge-3.5*b-2*gap; r.y = bottom; break;
+          +    }
+          +    return r;
+          +}
+          --- /dev/null
+          +++ b/ios/tests/touch_policy_test.c
+          @@ -0,0 +1,36 @@
+          +#include "Theft4TouchPolicy.h"
+          +#include <assert.h>
+          +#include <stdio.h>
+          +
+          +static void check_layout(double w, double h) {
+          +    for (int i=0; i<17; ++i) {
+          +        Theft4TouchRect a = theft4_control_rect(i,w,h);
+          +        assert(a.x >= 0 && a.y >= 0 && a.x+a.w <= w && a.y+a.h <= h);
+          +        assert(a.w >= 36 && a.h >= 36);
+          +        for (int j=0; j<i; ++j) {
+          +            Theft4TouchRect b = theft4_control_rect(j,w,h);
+          +            if (a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y) fprintf(stderr,"overlap %g x %g: %d / %d\n",w,h,i,j);
+          +            assert(!(a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y));
+          +        }
+          +    }
+          +}
+          +int main(void) {
+          +    assert(theft4_look_sensitivity(NAN) == 1);
+          +    assert(theft4_look_sensitivity(INFINITY) == 1);
+          +    assert(theft4_look_sensitivity(-1) == .25);
+          +    assert(theft4_look_sensitivity(9) == 4);
+          +    assert(theft4_swipe_axis(0,1.0/60,4) == 0);
+          +    assert(theft4_swipe_axis(18,1.0/60,1) == 32767);
+          +    assert(theft4_swipe_axis(-18,1.0/60,1) == -32767);
+          +    assert(theft4_swipe_axis(10000,1.0/60,4) == 32767);
+          +    assert(theft4_swipe_axis(9,1.0/60,1) == theft4_swipe_axis(18,1.0/30,1));
+          +    assert(theft4_swipe_axis(9,1.0/60,1) == theft4_swipe_axis(4.5,1.0/120,1));
+          +    assert(theft4_swipe_axis(9,1.0/60,1) == theft4_swipe_axis(4.5,1.0/60,2));
+          +    assert(theft4_swipe_axis(20,.5,1) == 0); // Discard stale motion after a stall.
+          +    assert(theft4_swipe_axis(NAN,1.0/60,1) == 0);
+          +    assert(theft4_swipe_axis(5,0,1) == 0);
+          +    check_layout(568,300); check_layout(667,354); check_layout(724,354);
+          +    check_layout(818,381); check_layout(932,409); check_layout(1024,724);
+          +    check_layout(1194,790); check_layout(1366,980);
+          +    puts("Swipe scaling, clamping, stale-input and landscape layout tests passed.");
+          +}
+          THEFT4_TOUCH_PATCH_END
+          git apply --check "$patch_file"
+          git apply "$patch_file"
+          cc -std=c11 -Wall -Wextra -Werror -Iios/Theft4 ios/tests/touch_policy_test.c -lm -o /tmp/touch-policy-test
+          /tmp/touch-policy-test
+          c++ -std=c++17 -pthread -Iios/bridge ios/tests/touch_input_test.cpp ios/bridge/theft4_touch_input.cpp -o /tmp/touch-input-test
+          /tmp/touch-input-test
+          git diff --check
+      - name: Prepare pinned Theft4 dependencies
+        working-directory: Theft4
+        run: |
+          set -euo pipefail
+          python tools/setup_repo.py 2>&1 | tee ../logs/dependencies.log
+          python tools/setup_repo.py --check
+      - name: Build iPhoneOS graphics libraries
+        run: |
+          set -euo pipefail
+          cmake -S XeniOS -B XeniOS/build-ios-xcode -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0 \
+            -DXENIA_ENABLE_IOS_MOLTENVK=ON \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee logs/graphics-configure.log
+          cmake --build XeniOS/build-ios-xcode --config Release \
+            --target MoltenVK MoltenVK_Common MoltenVK_ShaderConverter spirv-cross SPIRV-Tools-static \
+            --parallel 3 2>&1 | tee logs/graphics-build.log
+          for lib in libMoltenVK.a libMoltenVK_Common.a libMoltenVK_ShaderConverter.a libspirv-cross.a libSPIRV-Tools.a; do
+            test -f "$THEFT4_MOLTENVK_IOS_LIB_DIR/$lib"
+            lipo -verify_arch arm64 "$THEFT4_MOLTENVK_IOS_LIB_DIR/$lib"
+          done
+      - name: Generate and compile iOS Metal shaders
+        working-directory: Theft4
+        run: |
+          set -euo pipefail
+          cmake -S tools/direct-metal -B out/direct-metal/build -DCMAKE_BUILD_TYPE=Release 2>&1 | tee ../logs/shader-configure.log
+          cmake --build out/direct-metal/build --target metal_shader_export metal_host_shader_export --parallel 3 2>&1 | tee ../logs/shader-tools.log
+          out/direct-metal/build/metal_shader_export out/direct-metal/corpus
+          out/direct-metal/build/metal_host_shader_export out/direct-metal/host-corpus
+          python tools/direct-metal/compile_shaders.py out/direct-metal/corpus out/direct-metal/ios --platform ios --jobs 3 2>&1 | tee ../logs/game-shaders.log
+          python tools/direct-metal/compile_shaders.py out/direct-metal/host-corpus out/direct-metal/ios/Host --platform ios --jobs 3 2>&1 | tee ../logs/host-shaders.log
+      - name: Build and validate unsigned IPA
+        working-directory: Theft4
+        run: |
+          set -euo pipefail
+          zsh tools/build_ios_release.sh 0.3.2 2>&1 | tee ../logs/ipa-build.log
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Theft4-touch-unsigned-IPA
+          path: |
+            Theft4/dist/*.ipa
+            Theft4/dist/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Theft4-build-diagnostics
+          path: |
+            logs/
+            Theft4/out/build/ios-device-release/CMakeFiles/CMakeConfigureLog.yaml
+            Theft4/out/direct-metal/ios/COMPILATION.json
+            Theft4/out/direct-metal/ios/Host/COMPILATION.json
+          if-no-files-found: warn
+          retention-days: 7
