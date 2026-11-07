@@ -517,6 +517,11 @@ jobs:
           c++ -std=c++17 -pthread -Iios/bridge ios/tests/touch_input_test.cpp ios/bridge/theft4_touch_input.cpp -o /tmp/touch-input-test
           /tmp/touch-input-test
           git diff --check
+      - name: Localize launcher to Chinese
+        working-directory: Theft4
+        run: |
+          set -euo pipefail
+          python "$GITHUB_WORKSPACE/localization/localize_build.py"
       - name: Install Khronos MoltenVK iOS static archive
         run: |
           set -euo pipefail
