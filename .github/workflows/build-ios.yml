@@ -203,7 +203,7 @@ jobs:
            
           +    _lookSensitivity = [UISlider new];
           +    _lookSensitivity.minimumValue = 0.25;
-          +    _lookSensitivity.maximumValue = 4.0;
+          +    _lookSensitivity.maximumValue = 20.0;
           +    _lookSensitivity.value = 1.0;
           +    _lookSensitivity.minimumTrackTintColor = Ink(0x35CDD1);
           +    _lookSensitivity.accessibilityIdentifier = @"settings.lookSensitivity";
@@ -221,7 +221,7 @@ jobs:
                    [self setting:@"FRAME-TIME GRAPH" detail:@"Frame delivery against the 33.3 ms target. Double-tap for a short detailed profile. Hold to mark a lag spike or stop and save a long capture." toggle:_showFrameTime],
                    [self setting:@"TOUCH CONTROLS" detail:@"Physical controllers continue to work when the overlay is hidden." toggle:_showControls],
           +        Column(@[Copy(@"滑动视角灵敏度", 14, YES),
-          +            Copy(@"在右侧空白区域滑动转动视角，松手即停。范围 0.25–4 倍，自动保存；不影响实体手柄。", 12, NO),
+          +            Copy(@"在右侧空白区域滑动转动视角，松手即停。范围 0.25–20 倍，自动保存；不影响实体手柄。", 12, NO),
           +            _lookSensitivity, _lookSensitivityMetrics, _resetLookSensitivity], 8),
                    Copy(@"A connected controller can move focus through this launcher. Use the D-pad or left stick to navigate and A to select.", 12, NO)
                ], 20);
@@ -313,7 +313,7 @@ jobs:
           +// Shared with the portable regression test; UIKit coordinates are points.
           +static inline double theft4_look_sensitivity(double value) {
           +    if (!isfinite(value)) return 1.0;
-          +    return fmax(0.25, fmin(4.0, value));
+          +    return fmax(0.25, fmin(20.0, value));
           +}
           +static inline int16_t theft4_swipe_axis(double delta, double elapsed, double sensitivity) {
           +    if (!isfinite(delta) || !isfinite(elapsed) || elapsed <= 0 || elapsed > 0.25) return 0;
@@ -375,14 +375,14 @@ jobs:
           +    assert(theft4_look_sensitivity(NAN) == 1);
           +    assert(theft4_look_sensitivity(INFINITY) == 1);
           +    assert(theft4_look_sensitivity(-1) == .25);
-          +    assert(theft4_look_sensitivity(9) == 4);
+          +    assert(theft4_look_sensitivity(21) == 20);
           +    assert(theft4_swipe_axis(0,1.0/60,4) == 0);
           +    assert(theft4_swipe_axis(18,1.0/60,1) == 32767);
           +    assert(theft4_swipe_axis(-18,1.0/60,1) == -32767);
           +    assert(theft4_swipe_axis(10000,1.0/60,4) == 32767);
           +    assert(theft4_swipe_axis(9,1.0/60,1) == theft4_swipe_axis(18,1.0/30,1));
           +    assert(theft4_swipe_axis(9,1.0/60,1) == theft4_swipe_axis(4.5,1.0/120,1));
-          +    assert(theft4_swipe_axis(9,1.0/60,1) == theft4_swipe_axis(4.5,1.0/60,2));
+          +    assert(theft4_swipe_axis(9,1.0/60,1) == theft4_swipe_axis(0.45,1.0/60,20));
           +    assert(theft4_swipe_axis(20,.5,1) == 0); // Discard stale motion after a stall.
           +    assert(theft4_swipe_axis(NAN,1.0/60,1) == 0);
           +    assert(theft4_swipe_axis(5,0,1) == 0);
